@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome To The Backrooms 3D</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { overflow: hidden; font-family: 'Courier New', monospace; background: #000; color: #fff; user-select: none; }
+        
+        #game-canvas { width: 100vw; height: 100vh; display: block; }
+
+        /* UI Overlays */
+        .overlay {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(15, 15, 10, 0.95); padding: 25px; border: 2px solid #666033;
+            box-shadow: 0 0 20px rgba(255, 255, 100, 0.2); text-align: center; min-width: 320px; z-index: 10;
+        }
+        .overlay h1, .overlay h2 { color: #ddcc55; margin-bottom: 12px; font-size: 18px; }
+        input, button {
+            display: block; width: 100%; margin: 8px 0; padding: 10px;
+            background: #1a1a14; color: #fff; border: 1px solid #444422; font-family: inherit;
+        }
+        button { cursor: pointer; background: #333311; font-weight: bold; }
+        button:hover { background: #555522; }
+
+        #hud { position: absolute; top: 15px; left: 15px; pointer-events: none; z-index: 5; }
+        .hud-panel { background: rgba(0,0,0,0.75); padding: 10px; border: 1px solid #444; margin-bottom: 10px; }
+        #social-panel { pointer-events: auto; }
+        .hidden { display: none !important; }
+
+        /* Drawing Editor Modal */
+        #skin-editor { display: flex; gap: 20px; text-align: left; }
+        #canvas-container { display: flex; flex-direction: column; align-items: center; }
+        #skin-canvas { background: #fff; border: 2px solid #555; cursor: crosshair; }
+        #preview-container { width: 180px; height: 180px; border: 1px solid #444; background: #050505; }
+        
+        /* Crosshair */
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 8px; height: 8px;
+            background: rgba(255, 255, 255, 0.5); border-radius: 50%; transform: translate(-50%, -50%);
+            pointer-events: none; z-index: 4;
+        }
+    </style>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script type="importmap">
+        {
+          "imports": {
+            "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.js"
+          }
+        }
+    </script>
+</head>
+<body>
+
+    <canvas id="game-canvas"></canvas>
+    <div id="crosshair" class="hidden"></div>
+
+    <!-- Login Overlay -->
+    <div id="auth-overlay" class="overlay">
+        <h1>BACKROOMS MULTIPLAYER</h1>
+        <input type="text" id="username" placeholder="Username" />
+        <input type="password" id="password" placeholder="Password" />
+        <button onclick="handleLogin()">Login / Play</button>
+        <button onclick="handleRegister()">Register Account</button>
+    </div>
+
+    <!-- Avatar Drawing Overlay -->
+    <div id="draw-overlay" class="overlay hidden">
+        <h2>CUSTOM CHARACTER SKIN EDITOR</h2>
+        <div id="skin-editor">
+            <div id="canvas-container">
+                <canvas id="skin-canvas" width="256" height="256"></canvas>
+                <input type="color" id="brush-color" value="#ff0000">
+                <button onclick="clearSkinCanvas()">Clear Canvas</button>
+            </div>
+            <div>
+                <p>3D Preview:</p>
+                <div id="preview-container"></div>
+                <button onclick="saveAndEnterGame()">Save Skin & Enter</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- HUD Overlay -->
+    <div id="hud" class="hidden">
+        <div class="hud-panel">
+            <div><strong>Level:</strong> <span id="level-display">0</span> - <span id="level-name">Lobby</span></div>
+            <div><strong>Safety Status:</strong> <span id="safety-display" style="color:#00ff00;">100% SAFE</span></div>
+            <div><strong>Controls:</strong> WASD to move, Click screen to lock mouse look</div>
+        </div>
+        <div id="social-panel" class="hud-panel">
+            <input type="text" id="friend-user" placeholder="Username" />
+            <button onclick="sendFriendReq()">Send Friend Request</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        const socket = io();
+        let scene, camera, renderer, localSocketId;
+        let previewScene, previewCamera, previewRenderer, previewMesh;
+        const otherPlayers = {};
+        const keyState = {};
+        let isPointerLocked = false;
+        let currentLevel = 0;
+        let activeTexture = null;
+
+        // Collision Systems
+        const wallBoxes = [];
+        const playerBox = new THREE.Box3();
+        const playerRadius = 0.3;
+
+        // Exit Portal Position
+        let exitPos = new THREE.Vector3();
+
+        // Monster Systems
+        let monsterMesh = null;
+        let monsterPos = new THREE.Vector3(4, 0, 4);
+
+        // Web Audio Synthesizer Engine
+        let audioCtx = null;
+        let humOsc = null, humGain = null;
+        let stepTimer = 0;
+
+        // --- Level Configurations (10 Levels) ---
+        const LEVEL_CONFIGS = [
+            { name: "Lobby", wall: 0x888833, floor: 0x222211, fog: 0x111105, fogDensity: 0.12, safe: true, speed: 0 },
+            { name: "Habitable Zone", wall: 0x334433, floor: 0x111d11, fog: 0x051005, fogDensity: 0.15, safe: false, speed: 0.02 },
+            { name: "Pipe Dreams", wall: 0x443322, floor: 0x221105, fog: 0x1a0d00, fogDensity: 0.18, safe: false, speed: 0.025 },
+            { name: "Electrical Station", wall: 0x222233, floor: 0x0a0a14, fog: 0x00000a, fogDensity: 0.22, safe: false, speed: 0.028 },
+            { name: "Abandoned Office", wall: 0x555544, floor: 0x222220, fog: 0x1a1a15, fogDensity: 0.10, safe: false, speed: 0.03 },
+            { name: "Terror Hotel", wall: 0x441111, floor: 0x1d0505, fog: 0x100000, fogDensity: 0.25, safe: false, speed: 0.032 },
+            { name: "Lights Out", wall: 0x111111, floor: 0x050505, fog: 0x000000, fogDensity: 0.35, safe: false, speed: 0.035 },
+            { name: "Thalassophobia", wall: 0x113344, floor: 0x051d28, fog: 0x00101a, fogDensity: 0.20, safe: false, speed: 0.038 },
+            { name: "Subliminal", wall: 0x666666, floor: 0x333333, fog: 0x222222, fogDensity: 0.08, safe: false, speed: 0.04 },
+            { name: "The End", wall: 0x220033, floor: 0x10001a, fog: 0x0a0010, fogDensity: 0.15, safe: false, speed: 0.045 }
+        ];
+
+        // Unique Maze Layout Grids (0 = Walkable, 1 = Wall, 2 = Exit Portal)
+        const LEVEL_GRIDS = [
+            // Level 0
+            [[1,1,1,1,1,1,1],[1,0,0,0,1,0,1],[1,0,1,0,1,0,1],[1,0,0,0,0,2,1],[1,1,1,1,1,1,1]],
+            // Level 1
+            [[1,1,1,1,1,1,1],[1,0,1,0,0,0,1],[1,0,1,0,1,0,1],[1,2,0,0,1,0,1],[1,1,1,1,1,1,1]],
+            // Level 2
+            [[1,1,1,1,1,1,1],[1,0,0,0,1,2,1],[1,1,1,0,1,0,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]],
+            // Level 3
+            [[1,1,1,1,1,1,1],[1,2,0,1,0,0,1],[1,0,1,1,0,1,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]],
+            // Level 4
+            [[1,1,1,1,1,1,1],[1,0,0,0,0,0,1],[1,0,1,1,1,0,1],[1,0,1,2,0,0,1],[1,1,1,1,1,1,1]],
+            // Level 5
+            [[1,1,1,1,1,1,1],[1,0,1,0,1,0,1],[1,0,0,0,1,2,1],[1,1,1,0,0,0,1],[1,1,1,1,1,1,1]],
+            // Level 6
+            [[1,1,1,1,1,1,1],[1,2,0,0,0,0,1],[1,1,1,1,0,1,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]],
+            // Level 7
+            [[1,1,1,1,1,1,1],[1,0,0,1,0,2,1],[1,0,1,1,0,0,1],[1,0,0,0,0,1,1],[1,1,1,1,1,1,1]],
+            // Level 8
+            [[1,1,1,1,1,1,1],[1,0,1,0,0,0,1],[1,0,1,0,1,2,1],[1,0,0,0,1,0,1],[1,1,1,1,1,1,1]],
+            // Level 9
+            [[1,1,1,1,1,1,1],[1,0,0,0,1,0,1],[1,1,0,1,1,0,1],[1,2,0,0,0,0,1],[1,1,1,1,1,1,1]]
+        ];
+
+        function initAudioEngine() {
+            if (audioCtx) return;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+            humOsc = audioCtx.createOscillator();
+            humGain = audioCtx.createGain();
+            
+            humOsc.type = 'sawtooth';
+            humOsc.frequency.setValueAtTime(60, audioCtx.currentTime);
+            humGain.gain.setValueAtTime(0.02, audioCtx.currentTime);
+
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(220, audioCtx.currentTime);
+
+            humOsc.connect(filter);
+            filter.connect(humGain);
+            humGain.connect(audioCtx.destination);
+            humOsc.start();
+        }
+
+        function playFootstepSound() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + 0.08);
+
+            gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.09);
+        }
+
+        let pitch = 0, yaw = 0;
+
+        // --- Auth API ---
+        window.handleRegister = async () => {
+            const u = document.getElementById('username').value;
+            const p = document.getElementById('password').value;
+            const res = await fetch('/api/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: u, password: p })
+            });
+            const data = await res.json();
+            alert(data.success ? 'Account Created!' : 'Registration Failed');
+        };
+
+        window.handleLogin = async () => {
+            const u = document.getElementById('username').value;
+            const p = document.getElementById('password').value;
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: u, password: p })
+            });
+            const data = await res.json();
+            if (data.success) {
+                document.getElementById('auth-overlay').classList.add('hidden');
+                document.getElementById('draw-overlay').classList.remove('hidden');
+                initSkinEditor();
+            } else {
+                alert('Invalid Login Credentials');
+            }
+        };
+
+        window.sendFriendReq = () => {
+            const target = document.getElementById('friend-user').value;
+            if (target) socket.emit('sendFriendRequest', target);
+        };
+
+        // --- 2D Drawing & Live 3D Skin Editor ---
+        const skinCanvas = document.getElementById('skin-canvas');
+        const ctx = skinCanvas.getContext('2d');
+        let isDrawing = false;
+
+        function initSkinEditor() {
+            ctx.fillStyle = '#aaaa33';
+            ctx.fillRect(0, 0, 256, 256);
+
+            skinCanvas.addEventListener('mousedown', () => isDrawing = true);
+            skinCanvas.addEventListener('mouseup', () => isDrawing = false);
+            skinCanvas.addEventListener('mousemove', drawSkin);
+
+            const container = document.getElementById('preview-container');
+            previewScene = new THREE.Scene();
+            previewCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 10);
+            previewCamera.position.set(0, 0, 3);
+
+            previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            previewRenderer.setSize(180, 180);
+            container.appendChild(previewRenderer.domElement);
+
+            activeTexture = new THREE.CanvasTexture(skinCanvas);
+            const geo = new THREE.BoxGeometry(0.8, 1.6, 0.4);
+            const mat = new THREE.MeshBasicMaterial({ map: activeTexture });
+            previewMesh = new THREE.Mesh(geo, mat);
+            previewScene.add(previewMesh);
+
+            function animatePreview() {
+                if (previewMesh) previewMesh.rotation.y += 0.01;
+                if (previewRenderer) previewRenderer.render(previewScene, previewCamera);
+                if (!document.getElementById('draw-overlay').classList.contains('hidden')) {
+                    requestAnimationFrame(animatePreview);
+                }
+            }
+            animatePreview();
+        }
+
+        function drawSkin(e) {
+            if (!isDrawing) return;
+            const rect = skinCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            ctx.fillStyle = document.getElementById('brush-color').value;
+            ctx.beginPath();
+            ctx.arc(x, y, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (activeTexture) activeTexture.needsUpdate = true;
+        }
+
+        window.clearSkinCanvas = () => {
+            ctx.fillStyle = '#aaaa33';
+            ctx.fillRect(0, 0, 256, 256);
+            if (activeTexture) activeTexture.needsUpdate = true;
+        };
+
+        window.saveAndEnterGame = () => {
+            document.getElementById('draw-overlay').classList.add('hidden');
+            document.getElementById('hud').classList.remove('hidden');
+            document.getElementById('crosshair').classList.remove('hidden');
+
+            initMainEngine();
+            const username = document.getElementById('username').value;
+            socket.emit('joinGame', username);
+
+            const imageData = skinCanvas.toDataURL();
+            socket.emit('updateSkin', imageData);
+        };
+
+        // --- Main 3D Graphics Engine ---
+        function initMainEngine() {
+            const canvas = document.getElementById('game-canvas');
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.6, 0);
+
+            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            const flashlight = new THREE.SpotLight(0xffffff, 2, 20, Math.PI / 6, 0.5);
+            flashlight.position.set(0, 0, 0);
+            camera.add(flashlight);
+            flashlight.target = camera;
+            scene.add(camera);
+
+            canvas.addEventListener('click', () => {
+                canvas.requestPointerLock();
+                initAudioEngine();
+                if (audioCtx && audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+            });
+
+            document.addEventListener('pointerlockchange', () => {
+                isPointerLocked = document.pointerLockElement === canvas;
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isPointerLocked) return;
+                yaw -= e.movementX * 0.002;
+                pitch -= e.movementY * 0.002;
+                pitch = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, pitch));
+                
+                camera.rotation.order = "YXZ";
+                camera.rotation.y = yaw;
+                camera.rotation.x = pitch;
+            });
+
+            window.addEventListener('keydown', (e) => keyState[e.key.toLowerCase()] = true);
+            window.addEventListener('keyup', (e) => keyState[e.key.toLowerCase()] = false);
+            window.addEventListener('resize', onWindowResize);
+
+            renderLoop();
+        }
+
+        function createPlayerMesh(skinDataUrl = null) {
+            const group = new THREE.Group();
+            const geo = new THREE.BoxGeometry(0.6, 1.8, 0.4);
+            let mat;
+
+            if (skinDataUrl) {
+                const img = new Image();
+                const tex = new THREE.Texture(img);
+                img.onload = () => { tex.needsUpdate = true; };
+                img.src = skinDataUrl;
+                mat = new THREE.MeshBasicMaterial({ map: tex });
+            } else {
+                mat = new THREE.MeshBasicMaterial({ color: 0xaaaa33 });
+            }
+
+            const body = new THREE.Mesh(geo, mat);
+            body.position.y = 0.9;
+            group.add(body);
+            return group;
+        }
+
+        function createMonsterMesh() {
+            const group = new THREE.Group();
+            const mat = new THREE.MeshBasicMaterial({ color: 0x050505 });
+            
+            const spineGeo = new THREE.CylinderGeometry(0.08, 0.08, 2.4);
+            const spine = new THREE.Mesh(spineGeo, mat);
+            spine.position.y = 1.2;
+            group.add(spine);
+
+            const armGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.6);
+            const arm1 = new THREE.Mesh(armGeo, mat);
+            arm1.position.set(0.4, 1.6, 0);
+            arm1.rotation.z = -0.6;
+            group.add(arm1);
+
+            const arm2 = new THREE.Mesh(armGeo, mat);
+            arm2.position.set(-0.4, 1.6, 0);
+            arm2.rotation.z = 0.6;
+            group.add(arm2);
+
+            return group;
+        }
+
+        function updatePlayerBox(pos) {
+            playerBox.min.set(pos.x - playerRadius, pos.y - 1.6, pos.z - playerRadius);
+            playerBox.max.set(pos.x + playerRadius, pos.y + 0.2, pos.z + playerRadius);
+        }
+
+        function checkWallCollision(targetPos) {
+            updatePlayerBox(targetPos);
+            for (let i = 0; i < wallBoxes.length; i++) {
+                if (playerBox.intersectsBox(wallBoxes[i])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // --- Multi-Level Loader System ---
+        function buildLevelLayout(lvlNumber) {
+            currentLevel = Math.min(Math.max(lvlNumber, 0), LEVEL_CONFIGS.length - 1);
+            wallBoxes.length = 0;
+
+            if (monsterMesh) {
+                scene.remove(monsterMesh);
+                monsterMesh = null;
+            }
+
+            const existing = scene.getObjectByName("levelMap");
+            if (existing) scene.remove(existing);
+
+            const mapGroup = new THREE.Group();
+            mapGroup.name = "levelMap";
+
+            const cfg = LEVEL_CONFIGS[currentLevel];
+            const grid = LEVEL_GRIDS[currentLevel];
+
+            // Update Fog and Environment
+            scene.fog = new THREE.FogExp2(cfg.fog, cfg.fogDensity);
+
+            const wallMat = new THREE.MeshBasicMaterial({ color: cfg.wall });
+            const boxGeo = new THREE.BoxGeometry(4, 4, 4);
+
+            for (let r = 0; r < grid.length; r++) {
+                for (let c = 0; c < grid[r].length; c++) {
+                    const tile = grid[r][c];
+                    const x = (c - 3) * 4;
+                    const z = (r - 2) * 4;
+
+                    if (tile === 1) {
+                        const wall = new THREE.Mesh(boxGeo, wallMat);
+                        wall.position.set(x, 2, z);
+                        mapGroup.add(wall);
+
+                        const box = new THREE.Box3().setFromObject(wall);
+                        wallBoxes.push(box);
+                    } else if (tile === 2) {
+                        const exitGeo = new THREE.BoxGeometry(2, 0.1, 2);
+                        const exitMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+                        const exitMesh = new THREE.Mesh(exitGeo, exitMat);
+                        exitMesh.position.set(x, 0.05, z);
+                        mapGroup.add(exitMesh);
+
+                        exitPos.set(x, 1.6, z);
+                    }
+                }
+            }
+
+            const planeGeo = new THREE.PlaneGeometry(60, 60);
+            const floorMat = new THREE.MeshBasicMaterial({ color: cfg.floor });
+            const floor = new THREE.Mesh(planeGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            mapGroup.add(floor);
+
+            const ceilingMat = new THREE.MeshBasicMaterial({ color: 0x050505 });
+            const ceiling = new THREE.Mesh(planeGeo, ceilingMat);
+            ceiling.position.y = 4;
+            ceiling.rotation.x = Math.PI / 2;
+            mapGroup.add(ceiling);
+
+            scene.add(mapGroup);
+            
+            // HUD Update
+            document.getElementById('level-display').innerText = currentLevel;
+            document.getElementById('level-name').innerText = cfg.name;
+            const safetyDisplay = document.getElementById('safety-display');
+
+            if (cfg.safe) {
+                safetyDisplay.innerText = "100% SAFE";
+                safetyDisplay.style.color = "#00ff00";
+            } else {
+                safetyDisplay.innerText = "HOSTILE ENTITIES PRESENT";
+                safetyDisplay.style.color = "#ff3333";
+                
+                monsterMesh = createMonsterMesh();
+                monsterPos.set(4, 0, 4);
+                monsterMesh.position.copy(monsterPos);
+                scene.add(monsterMesh);
+            }
+        }
+
+        // --- Network Event Listeners ---
+        socket.on('initGame', (data) => {
+            localSocketId = data.id;
+            buildLevelLayout(data.level);
+
+            for (let id in data.players) {
+                if (id !== localSocketId) {
+                    otherPlayers[id] = createPlayerMesh(data.players[id].skinData);
+                    scene.add(otherPlayers[id]);
+                }
+            }
+        });
+
+        socket.on('playerJoined', (data) => {
+            otherPlayers[data.id] = createPlayerMesh(data.player.skinData);
+            scene.add(otherPlayers[data.id]);
+        });
+
+        socket.on('playerMoved', (data) => {
+            if (otherPlayers[data.id]) {
+                otherPlayers[data.id].position.set(data.x, data.y - 0.9, data.z);
+                otherPlayers[data.id].rotation.y = data.ry;
+            }
+        });
+
+        socket.on('skinUpdated', (data) => {
+            if (otherPlayers[data.id]) {
+                scene.remove(otherPlayers[data.id]);
+                otherPlayers[data.id] = createPlayerMesh(data.skinData);
+                scene.add(otherPlayers[data.id]);
+            }
+        });
+
+        socket.on('loadLevel', (lvlNumber) => {
+            buildLevelLayout(lvlNumber);
+        });
+
+        socket.on('playerLeft', (id) => {
+            if (otherPlayers[id]) {
+                scene.remove(otherPlayers[id]);
+                delete otherPlayers[id];
+            }
+        });
+
+        socket.on('sysMessage', (msg) => alert(msg));
+
+        // --- Game Execution & Movement Loop ---
+        function renderLoop() {
+            requestAnimationFrame(renderLoop);
+
+            if (camera && isPointerLocked) {
+                let moved = false;
+                const speed = 0.08;
+                const moveVector = new THREE.Vector3();
+
+                if (keyState['w']) { 
+                    const dir = new THREE.Vector3(); 
+                    camera.getWorldDirection(dir); dir.y = 0; dir.normalize(); 
+                    moveVector.addScaledVector(dir, speed); moved = true; 
+                }
+                if (keyState['s']) { 
+                    const dir = new THREE.Vector3(); 
+                    camera.getWorldDirection(dir); dir.y = 0; dir.normalize(); 
+                    moveVector.addScaledVector(dir, -speed); moved = true; 
+                }
+                if (keyState['a']) { 
+                    const dir = new THREE.Vector3(); 
+                    camera.getWorldDirection(dir); dir.y = 0; dir.normalize(); dir.cross(camera.up); 
+                    moveVector.addScaledVector(dir, -speed); moved = true; 
+                }
+                if (keyState['d']) { 
+                    const dir = new THREE.Vector3(); 
+                    camera.getWorldDirection(dir); dir.y = 0; dir.normalize(); dir.cross(camera.up); 
+                    moveVector.addScaledVector(dir, speed); moved = true; 
+                }
+
+                if (moved) {
+                    const currentPos = camera.position.clone();
+                    const targetPos = currentPos.clone().add(moveVector);
+
+                    const testX = currentPos.clone();
+                    testX.x = targetPos.x;
+                    if (!checkWallCollision(testX)) {
+                        camera.position.x = targetPos.x;
+                    }
+
+                    const testZ = currentPos.clone();
+                    testZ.z = targetPos.z;
+                    if (!checkWallCollision(testZ)) {
+                        camera.position.z = targetPos.z;
+                    }
+
+                    stepTimer++;
+                    if (stepTimer % 22 === 0) {
+                        playFootstepSound();
+                    }
+
+                    // Check Level Exit Portal Collision
+                    if (camera.position.distanceTo(exitPos) < 1.2) {
+                        const nextLevel = (currentLevel + 1) % LEVEL_CONFIGS.length;
+                        socket.emit('changeLevel', nextLevel);
+                    }
+
+                    socket.emit('playerMove', {
+                        x: camera.position.x,
+                        y: camera.position.y,
+                        z: camera.position.z,
+                        rx: camera.rotation.x,
+                        ry: camera.rotation.y
+                    });
+                }
+
+                // Monster AI (Only active on unsafe levels)
+                const cfg = LEVEL_CONFIGS[currentLevel];
+                if (!cfg.safe && monsterMesh) {
+                    const dirToPlayer = new THREE.Vector3().subVectors(camera.position, monsterPos);
+                    dirToPlayer.y = 0;
+                    
+                    if (dirToPlayer.length() > 0.5) {
+                        dirToPlayer.normalize();
+                        monsterPos.addScaledVector(dirToPlayer, cfg.speed);
+                        monsterMesh.position.copy(monsterPos);
+                        monsterMesh.lookAt(camera.position.x, 0, camera.position.z);
+                    } else {
+                        alert("Caught by entity! Teleporting back to Level 0...");
+                        socket.emit('changeLevel', 0);
+                    }
+                }
+            }
+
+            if (renderer && scene && camera) {
+                renderer.render(scene, camera);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
