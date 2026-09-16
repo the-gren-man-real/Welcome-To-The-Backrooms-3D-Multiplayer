@@ -8,25 +8,27 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.json());
+// Serves static files from the "public" folder
 app.use(express.static(path.join(__dirname, 'public')));
 
-// In-memory database for accounts and player states
+// In-memory data store
 const users = {};
 const players = {};
 
-// Auth Endpoints
+// Register API
 app.post('/api/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
-        return res.json({ success: false, message: 'Missing fields' });
+        return res.json({ success: false, message: 'Missing username or password' });
     }
     if (users[username]) {
-        return res.json({ success: false, message: 'Username taken' });
+        return res.json({ success: false, message: 'Username already taken' });
     }
     users[username] = { password };
     res.json({ success: true });
 });
 
+// Login API
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     if (users[username] && users[username].password === password) {
@@ -35,7 +37,7 @@ app.post('/api/login', (req, res) => {
     res.json({ success: false, message: 'Invalid credentials' });
 });
 
-// Socket.io Game Server Logic
+// Socket.io Multiplayer Handling
 io.on('connection', (socket) => {
     socket.on('joinGame', (username) => {
         players[socket.id] = {
@@ -95,5 +97,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
