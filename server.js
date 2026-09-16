@@ -7,15 +7,18 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+// Middleware
 app.use(express.json());
-// Serves static files from the "public" folder
-app.use(express.static(path.join(__dirname, 'public')));
+
+// Serve static files from the public directory
+const publicPath = path.join(__dirname, 'public');
+app.use(express.static(publicPath));
 
 // In-memory data store
 const users = {};
 const players = {};
 
-// Register API
+// Authentication API Routes
 app.post('/api/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -28,7 +31,6 @@ app.post('/api/register', (req, res) => {
     res.json({ success: true });
 });
 
-// Login API
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     if (users[username] && users[username].password === password) {
@@ -37,7 +39,7 @@ app.post('/api/login', (req, res) => {
     res.json({ success: false, message: 'Invalid credentials' });
 });
 
-// Socket.io Multiplayer Handling
+// Socket.IO Multiplayer Logic
 io.on('connection', (socket) => {
     socket.on('joinGame', (username) => {
         players[socket.id] = {
@@ -95,7 +97,13 @@ io.on('connection', (socket) => {
     });
 });
 
+// Explicit wildcard route to resolve single-page app routing on Render
+app.get('*', (req, res) => {
+    res.sendFile(path.join(publicPath, 'index.html'));
+});
+
+// Dynamic port assignment required for Render deployment
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server listening on port ${PORT}`);
 });
